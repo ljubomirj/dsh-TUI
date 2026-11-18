@@ -398,7 +398,11 @@ Profile 模式不再使用旧的 `DSH_TUI_COMPACT_RATIO`、`DSH_TUI_COMPACT_RETA
 - 来源：内置 catalog 路由或自定义 API 端点。
 - 仅**用户配置层**写入的 provider 可编辑/删除；组合 base 继承来的不可删。
 - 密钥写入 `~/.dsh/.credentials.yaml`（0600），界面只显示 `••••••`。
-- 只有非环境变量来源的密钥才写库；与其他 provider 共用的密钥删除时保留。
+- 环境变量提供的 key 仍是默认值。`/provider` 会同时显示变量名和值指纹
+  （`OPENCODE_GO_API_KEY (oc_sk_590...)`——密钥的结构化前缀加 secret 前
+  3 个字符），既能认出当前生效的 key，又不泄露它。粘贴新 key 会在凭据库
+  存一份覆盖值，优先级高于环境变量；留空则保持当前 key。与其他 provider
+  共用的密钥删除时保留。
 - 编辑「模型列表」时会重新拉取候选：内置 catalog 路由先取安装目录快照，
   只要该路由存有 baseURL（或正在添加时填了端点），再用已存密钥实时探测
   `GET {baseURL}/models` 并合并——仅线上有的新模型标「线上新增」，勾选后

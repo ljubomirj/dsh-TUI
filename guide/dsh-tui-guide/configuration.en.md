@@ -453,7 +453,12 @@ providers without a restart.
   deleted; ones inherited from the composition base cannot be removed.
 - Keys are written to `~/.dsh/.credentials.yaml` (mode 0600) and render as
   `••••••`.
-- Only non-environment keys are written to the store; a key shared with
+- An environment-provided key stays the default. `/provider` names the
+  variable and shows a fingerprint of the value
+  (`OPENCODE_GO_API_KEY (oc_sk_590...)` — the structural key lead plus three
+  characters of the secret body), so the key in effect is recognizable
+  without being disclosed. Pasting a key stores an override that outranks the
+  environment; an empty answer keeps the current key. A key shared with
   another provider is kept on delete.
 - Editing the model list re-fetches the candidates: a built-in catalog route
   starts from the installed catalog snapshot and, whenever the route stores a

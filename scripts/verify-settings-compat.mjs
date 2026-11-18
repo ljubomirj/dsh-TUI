@@ -526,7 +526,11 @@ for (const api of ['legacy', 'forms']) {
   }
   const services = {
     settings,
-    credentials: { resolve: async () => undefined, set: async () => {}, unset: async () => {} },
+    credentials: {
+      resolve: async () => ({ value: 'oc_sk_590abcdefgh', source: 'env' }),
+      set: async () => {},
+      unset: async () => {},
+    },
     llm: { listConfigurableProviders: () => [{ settingsNs: 'llm-pi-ai', provider: 'test', displayName: 'Test' }] },
   }
   const hosts = createSettingsHosts({ get: name => services[name] })
@@ -536,6 +540,11 @@ for (const api of ['legacy', 'forms']) {
   assert.equal(provider.routeExists('missing'), false)
   assert.equal(provider.listRefUsers('TEST_CREDENTIAL').length, 1)
   assert.equal(provider.listConfiguredProviders().length, 1)
+  assert.deepEqual(
+    await provider.resolveCredential('TEST_CREDENTIAL'),
+    { value: 'oc_sk_590abcdefgh', source: 'environment' },
+    `${api}: the provider host maps the credential layer to the ambient source`,
+  )
   const host = hosts.settingsHost()
   assert.equal(host.listNamespaces()[0].revision, 7)
   const ops = [{ op: 'set', path: ['providers', 'test', 'baseURL'], value: 'https://new.invalid' }]

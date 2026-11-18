@@ -13,7 +13,8 @@
  *    question; profile carries api + baseURL + plain id models.
  * 4. custom path with discovery: adopted capacities land on the models.
  * 5. writeProfile failure with no prior credential unsets the new one.
- * 6. env shadow: credential write skipped, profile still references the ref.
+ * 6. ambient key: a pasted key is stored as an override; an empty answer
+ *    keeps the environment key and writes nothing.
  * 7. user cancel (Esc) mid-wizard: zero side effects, outcome 'cancelled'.
  * 8. invalid route id is rejected and re-asked before proceeding.
  * 9. deriveKeyRef matches the web UI's convention.
@@ -41,13 +42,13 @@
  *    `baseURL` and nothing else — no profile rewrite, no discovery.
  * 20. edit a custom route, wire protocol: the current protocol is
  *    default-focused (defaultSelected); a single-field path patch sets `api`.
- * 21. edit a shadowed-key route: "Edit API Key" refuses (env) → cancelled,
- *    nothing written.
+ * 21. edit an env-provided key: the box opens with the variable and its
+ *    fingerprint; an empty answer keeps it, a pasted key stores an override.
  * 22. edit with no configured providers: warning, cancelled.
  * 23. delete via the edit menu (stored key): profile then credential removed,
  *    both in transcript.
- * 24. delete via the edit menu with an env-shadowed key: credential left
- *    alone, env line pushed.
+ * 24. delete via the edit menu with an ambient key: nothing stored to
+ *    remove, ambient line pushed.
  * 25. delete cancelled at the confirm: nothing removed.
  * 26. a no-op base URL edit (empty input): nothing written, 'cancelled'.
  * 27. custom-route model-list edit that ends up empty: rejected with the
@@ -88,6 +89,7 @@
  * 43–52. Tab capability drafts: add/edit commits, cancellation, unchanged
  * selections, unchecked edits, whole-catalog overrides, override migration,
  * offline editing, inheritance resets, validation and no-op saves.
+ * 53. key fingerprints: structural lead + three secret characters.
  *
  * Run with plain node against the compiled lib (after `pnpm build`):
  * `node scripts/verify-provider-wizard.mjs`
@@ -98,6 +100,7 @@ import {
   runProviderWizard,
 } from '../lib/types/dsh-adapter/providerWizard.js'
 import { t } from '../lib/types/i18n.js'
+import { keyFingerprint } from '../lib/types/utils/keyFingerprint.js'
 
 let failed = 0
 function check(name, ok, extra = '') {
@@ -180,9 +183,17 @@ function makeDeps(script, options = {}) {
       if (options.discoverThrows) throw new Error('connection refused')
       return options.discovered ?? []
     },
-    envShadows: ref => options.shadow === ref,
-    envValue: ref => options.shadow === ref ? (options.shadowValue ?? 'sk-from-env') : undefined,
-    readCredential: async ref => options.storedCredentials?.[ref],
+    resolveCredential: async ref => {
+      // The real credentials service ranks the managed store above the
+      // ambient layers; the stub mirrors that precedence.
+      if (options.storedCredentials?.[ref] !== undefined) {
+        return { value: options.storedCredentials[ref], source: 'stored' }
+      }
+      if (options.shadow === ref) {
+        return { value: options.shadowValue ?? 'sk-from-env', source: 'environment' }
+      }
+      return undefined
+    },
     writeCredential: (ref, value) => {
       if (options.credentialThrows) throw new Error('credential rejected')
       calls.credentials.push([ref, value])
@@ -294,7 +305,9 @@ const MENU_DELETE = { selected: [t('provider-opt-edit-delete')] }
   check('1 catalog: confirm detail is a preview, not a success line',
     (calls.details.confirm ?? '').includes(t('provider-line-route', { route: 'deepseek' }))
       && !(calls.details.confirm ?? '').includes(t('provider-line-action-added', { route: 'deepseek' }))
-      && (calls.details.confirm ?? '').includes(t('provider-line-keyref-preview', { ref: 'DEEPSEEK_API_KEY' })),
+      && (calls.details.confirm ?? '').includes(t('provider-line-key-will-store', {
+        ref: 'DEEPSEEK_API_KEY', hint: '',
+      })),
     calls.details.confirm)
 }
 
@@ -457,12 +470,13 @@ const MENU_DELETE = { selected: [t('provider-opt-edit-delete')] }
     source.includes("descriptor.ns === 'llm-pi-ai'"))
 }
 
-// 6. env shadow: credential write skipped, profile still references the ref.
+// 6. ambient key: a pasted key is stored as an override (the store outranks
+// the environment); the profile still references the ref.
 {
   const { deps, calls } = makeDeps({
     'mode': MODE_CATALOG,
     'catalog': { selected: ['deepseek'] },
-    'apikey': { custom: 'sk-shadowed' },
+    'apikey': { custom: 'oc_sk_777override' },
     'baseurl-choice': SKIP_BASEURL,
     'models': { selected: ['deepseek-chat'] },
     'confirm': CONFIRM_WRITE,
@@ -470,12 +484,78 @@ const MENU_DELETE = { selected: [t('provider-opt-edit-delete')] }
   }, {
     discovered: [{ id: 'deepseek-chat' }],
     shadow: 'DEEPSEEK_API_KEY',
+    shadowValue: 'oc_sk_590fromenv',
   })
   const outcome = await runProviderWizard(deps)
-  check('6 shadow: outcome added', outcome === 'added', outcome)
-  check('6 shadow: credential write skipped', eq(calls.credentials, []))
-  check('6 shadow: profile still references the ref',
+  check('6 ambient + typed: outcome added', outcome === 'added', outcome)
+  check('6 ambient + typed: credential stored as an override',
+    eq(calls.credentials, [['DEEPSEEK_API_KEY', 'oc_sk_777override']]),
+    JSON.stringify(calls.credentials))
+  check('6 ambient + typed: profile still references the ref',
     calls.profiles[0]?.[1]?.apiKeyEnv === 'DEEPSEEK_API_KEY')
+  check('6 ambient + typed: prompt shows the env variable and its fingerprint',
+    (calls.details.apikey ?? '').includes('DEEPSEEK_API_KEY')
+      && (calls.details.apikey ?? '').includes('oc_sk_590...'),
+    calls.details.apikey)
+  check('6 ambient + typed: summary line says the key is stored',
+    calls.pushed[0]?.lines.some(line => line === t('provider-line-key-stored', {
+      ref: 'DEEPSEEK_API_KEY', hint: t('provider-hint-wrap', { hint: 'oc_sk_777...' }),
+    })) === true,
+    JSON.stringify(calls.pushed[0]?.lines))
+}
+
+// 6b. ambient key and an empty answer: the environment stays the default and
+// nothing is written to the store.
+{
+  const { deps, calls } = makeDeps({
+    'mode': MODE_CATALOG,
+    'catalog': { selected: ['deepseek'] },
+    'apikey': { custom: '' },
+    'baseurl-choice': SKIP_BASEURL,
+    'models': { selected: ['deepseek-chat'] },
+    'confirm': CONFIRM_WRITE,
+    'switch': KEEP_MODEL,
+  }, {
+    discovered: [{ id: 'deepseek-chat' }],
+    shadow: 'DEEPSEEK_API_KEY',
+    shadowValue: 'oc_sk_590fromenv',
+  })
+  const outcome = await runProviderWizard(deps)
+  check('6b ambient + empty: outcome added', outcome === 'added', outcome)
+  check('6b ambient + empty: credential write skipped', eq(calls.credentials, []))
+  check('6b ambient + empty: profile still references the ref',
+    calls.profiles[0]?.[1]?.apiKeyEnv === 'DEEPSEEK_API_KEY')
+  check('6b ambient + empty: summary names the environment source',
+    calls.pushed[0]?.lines.some(line => line === t('provider-line-key-env', {
+      ref: 'DEEPSEEK_API_KEY', hint: t('provider-hint-wrap', { hint: 'oc_sk_590...' }),
+    })) === true,
+    JSON.stringify(calls.pushed[0]?.lines))
+}
+
+// 6c. a custom route with an ambient key and an empty answer: the draft
+// discovery authenticates with the ambient key the route will use, and the
+// credential is still not written.
+{
+  const { deps, calls } = makeDeps({
+    'mode': MODE_CUSTOM,
+    'route-id': { custom: 'acme-gw' },
+    'apikey': { custom: '' },
+    'baseurl': { custom: 'https://gw.example/v1' },
+    'protocol': { selected: ['openai-completions'] },
+    'models': { selected: ['m1'] },
+    'confirm': CONFIRM_WRITE,
+    'switch': KEEP_MODEL,
+  }, {
+    discovered: [{ id: 'm1' }],
+    shadow: 'ACME_GW_API_KEY',
+    shadowValue: 'oc_sk_590fromenv',
+  })
+  const outcome = await runProviderWizard(deps)
+  check('6c ambient custom: outcome added', outcome === 'added', outcome)
+  check('6c ambient custom: discovery uses the ambient key',
+    calls.discoverRequests[0]?.apiKey === 'oc_sk_590fromenv',
+    JSON.stringify(calls.discoverRequests))
+  check('6c ambient custom: credential write skipped', eq(calls.credentials, []))
 }
 
 // 7. cancel mid-wizard: zero side effects.
@@ -732,7 +812,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_MODELS,
     'models': { selected: ['deepseek-reasoner'] },
   }, {
-    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', shadowed: false, isCatalog: true, models: ['deepseek-chat'], modelEntries: [{ id: 'deepseek-chat' }] }],
+    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', isCatalog: true, models: ['deepseek-chat'], modelEntries: [{ id: 'deepseek-chat' }] }],
     discovered: [{ id: 'deepseek-chat' }, { id: 'deepseek-reasoner' }],
   })
   const outcome = await runProviderWizard(deps)
@@ -766,7 +846,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_KEY,
     'apikey': { custom: 'sk-new' },
   }, {
-    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
+    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
     storedCredentials: { ACME_GATEWAY_API_KEY: 'sk-old' },
   })
   const outcome = await runProviderWizard(deps)
@@ -775,8 +855,8 @@ function oauthStub(behavior = {}) {
     eq(calls.credentials, [['ACME_GATEWAY_API_KEY', 'sk-new']]),
     JSON.stringify(calls.credentials))
   check('18 edit key: profile untouched', eq(calls.profiles, []), JSON.stringify(calls.profiles))
-  check('18 edit key: transcript notes the updated key',
-    calls.pushed[0]?.lines.includes(t('provider-line-key-updated', { ref: 'ACME_GATEWAY_API_KEY' })) === true,
+  check('18 edit key: transcript notes the stored key',
+    calls.pushed[0]?.lines.includes(t('provider-line-key-stored', { ref: 'ACME_GATEWAY_API_KEY', hint: '' })) === true,
     JSON.stringify(calls.pushed[0]?.lines))
 }
 
@@ -790,7 +870,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_BASEURL,
     'baseurl': { custom: 'https://gw.example/v2' },
   }, {
-    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
+    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
     discovered: [{ id: 'acme-large', contextWindow: 131072, maxTokens: 8192 }],
     storedCredentials: { ACME_GATEWAY_API_KEY: 'sk-old' },
   })
@@ -812,7 +892,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_PROTOCOL,
     'protocol': { selected: ['anthropic-messages'] },
   }, {
-    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
+    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
     discovered: [{ id: 'acme-large' }],
     storedCredentials: { ACME_GATEWAY_API_KEY: 'sk-old' },
   })
@@ -825,25 +905,56 @@ function oauthStub(behavior = {}) {
     JSON.stringify(calls.mutations))
 }
 
-// 21. edit a shadowed-key route: "Edit API Key" refuses (the env provides
-// the key) → cancelled, nothing written.
+// 21. edit an env-provided key: the box opens with the variable and its
+// fingerprint; an empty answer keeps the environment key and writes nothing.
 {
   const { deps, calls } = makeDeps({
     'action': ACTION_EDIT,
     'edit-provider': { selected: ['deepseek'] },
     'edit-menu': MENU_KEY,
+    'apikey': { custom: '' },
   }, {
-    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', shadowed: true, isCatalog: true, models: ['deepseek-chat'] }],
+    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', isCatalog: true, models: ['deepseek-chat'] }],
     shadow: 'DEEPSEEK_API_KEY',
+    shadowValue: 'oc_sk_590fromenv',
   })
   const outcome = await runProviderWizard(deps)
-  check('21 edit shadow: outcome cancelled', outcome === 'cancelled', outcome)
-  check('21 edit shadow: Edit API Key refused without asking for a key',
-    !calls.asks.includes('apikey')
-      && calls.notifications.some(n => n.color === 'warning' && n.text.includes('DEEPSEEK_API_KEY')),
+  check('21 edit ambient: outcome cancelled', outcome === 'cancelled', outcome)
+  check('21 edit ambient: the key box opens with source and fingerprint',
+    calls.asks.includes('apikey')
+      && (calls.details.apikey ?? '').includes('DEEPSEEK_API_KEY')
+      && (calls.details.apikey ?? '').includes('oc_sk_590...'),
+    calls.details.apikey)
+  check('21 edit ambient: empty answer keeps the key',
+    calls.notifications.some(n => n.text === t('provider-key-kept', { ref: 'DEEPSEEK_API_KEY' })),
     JSON.stringify(calls.notifications))
-  check('21 edit shadow: nothing written',
+  check('21 edit ambient: nothing written',
     eq(calls.credentials, []) && eq(calls.profiles, []))
+}
+
+// 21b. edit an env-provided key and paste a new one: the store takes the
+// override (which outranks the environment at request time).
+{
+  const { deps, calls } = makeDeps({
+    'action': ACTION_EDIT,
+    'edit-provider': { selected: ['deepseek'] },
+    'edit-menu': MENU_KEY,
+    'apikey': { custom: 'oc_sk_777override' },
+  }, {
+    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', isCatalog: true, models: ['deepseek-chat'] }],
+    shadow: 'DEEPSEEK_API_KEY',
+    shadowValue: 'oc_sk_590fromenv',
+  })
+  const outcome = await runProviderWizard(deps)
+  check('21b edit ambient + typed: outcome updated', outcome === 'updated', outcome)
+  check('21b edit ambient + typed: credential stored',
+    eq(calls.credentials, [['DEEPSEEK_API_KEY', 'oc_sk_777override']]),
+    JSON.stringify(calls.credentials))
+  check('21b edit ambient + typed: summary says stored with the new fingerprint',
+    calls.pushed[0]?.lines.some(line => line === t('provider-line-key-stored', {
+      ref: 'DEEPSEEK_API_KEY', hint: t('provider-hint-wrap', { hint: 'oc_sk_777...' }),
+    })) === true,
+    JSON.stringify(calls.pushed[0]?.lines))
 }
 
 // 22. edit with no configured providers: warning, nothing asked, cancelled.
@@ -869,7 +980,8 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_DELETE,
     'delete-confirm': { selected: [t('provider-opt-delete-yes')] },
   }, {
-    configured: [{ route: 'deepseek', ref: 'MY-ROUTE_KEY', shadowed: false, isCatalog: true, models: ['deepseek-chat'] }],
+    configured: [{ route: 'deepseek', ref: 'MY-ROUTE_KEY', isCatalog: true, models: ['deepseek-chat'] }],
+    storedCredentials: { 'MY-ROUTE_KEY': 'sk-old' },
   })
   const outcome = await runProviderWizard(deps)
   check('23 delete: outcome deleted', outcome === 'deleted', outcome)
@@ -886,8 +998,8 @@ function oauthStub(behavior = {}) {
     calls.details['delete-confirm'])
 }
 
-// 24. delete via the edit menu, env-shadowed key: profile removed, credential
-// left alone, transcript says the key came from the environment.
+// 24. delete via the edit menu, ambient key: profile removed, nothing stored
+// for the ref is removed, transcript says the key is ambient.
 {
   const { deps, calls } = makeDeps({
     'action': ACTION_EDIT,
@@ -895,15 +1007,16 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_DELETE,
     'delete-confirm': { selected: [t('provider-opt-delete-yes')] },
   }, {
-    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', shadowed: true, isCatalog: true, models: ['deepseek-chat'] }],
+    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', isCatalog: true, models: ['deepseek-chat'] }],
     shadow: 'DEEPSEEK_API_KEY',
+    shadowValue: 'oc_sk_590fromenv',
   })
   const outcome = await runProviderWizard(deps)
-  check('24 delete shadow: outcome deleted', outcome === 'deleted', outcome)
-  check('24 delete shadow: profile removed', eq(calls.removedProfiles, ['deepseek']), JSON.stringify(calls.removedProfiles))
-  check('24 delete shadow: credential NOT removed', eq(calls.removed, []), JSON.stringify(calls.removed))
-  check('24 delete shadow: transcript notes the env keyref',
-    calls.pushed[0]?.lines.includes(t('provider-line-deleted-key-shadowed', { ref: 'DEEPSEEK_API_KEY' })) === true,
+  check('24 delete ambient: outcome deleted', outcome === 'deleted', outcome)
+  check('24 delete ambient: profile removed', eq(calls.removedProfiles, ['deepseek']), JSON.stringify(calls.removedProfiles))
+  check('24 delete ambient: credential NOT removed', eq(calls.removed, []), JSON.stringify(calls.removed))
+  check('24 delete ambient: transcript notes the ambient key',
+    calls.pushed[0]?.lines.includes(t('provider-line-deleted-key-ambient', { ref: 'DEEPSEEK_API_KEY' })) === true,
     JSON.stringify(calls.pushed[0]?.lines))
 }
 
@@ -915,7 +1028,8 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_DELETE,
     'delete-confirm': { selected: [t('provider-opt-confirm-cancel')] },
   }, {
-    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', shadowed: false, isCatalog: true, models: ['deepseek-chat'] }],
+    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', isCatalog: true, models: ['deepseek-chat'] }],
+    storedCredentials: { DEEPSEEK_API_KEY: 'sk-old' },
   })
   const outcome = await runProviderWizard(deps)
   check('25 delete cancel: outcome cancelled', outcome === 'cancelled', outcome)
@@ -931,7 +1045,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_BASEURL,
     'baseurl': { custom: '' },
   }, {
-    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
+    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
   })
   const outcome = await runProviderWizard(deps)
   check('26 no-op baseURL: outcome cancelled', outcome === 'cancelled', outcome)
@@ -950,7 +1064,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_MODELS,
     'models': { selected: [] },
   }, {
-    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
+    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
     discovered: [{ id: 'acme-large' }],
   })
   const outcome = await runProviderWizard(deps)
@@ -971,7 +1085,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_KEY,
     'apikey': { custom: 'sk-x' },
   }, {
-    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', shadowed: false, isCatalog: true, models: ['deepseek-chat'] }],
+    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', isCatalog: true, models: ['deepseek-chat'] }],
   })
   const outcomeCatalog = await runProviderWizard(depsCatalog)
   const catalogLabels = Object.keys(callsCatalog.optionDescriptions['edit-menu'] ?? {})
@@ -990,7 +1104,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_KEY,
     'apikey': { custom: 'sk-x' },
   }, {
-    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
+    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
   })
   const outcomeCustom = await runProviderWizard(depsCustom)
   const customLabels = Object.keys(callsCustom.optionDescriptions['edit-menu'] ?? {})
@@ -1015,7 +1129,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_KEY,
     'apikey': { custom: 'sk-x' },
   }, {
-    configured: [{ route: 'openai', ref: 'OPENAI_API_KEY', shadowed: false, isCatalog: true, api: 'openai-responses', models: ['gpt-1'] }],
+    configured: [{ route: 'openai', ref: 'OPENAI_API_KEY', isCatalog: true, api: 'openai-responses', models: ['gpt-1'] }],
   })
   const outcome = await runProviderWizard(deps)
   const labels = Object.keys(calls.optionDescriptions['edit-menu'] ?? {})
@@ -1040,7 +1154,8 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_DELETE,
     'delete-confirm': { selected: [t('provider-opt-delete-yes')] },
   }, {
-    configured: [{ route: 'deepseek', ref: 'MY-ROUTE_KEY', shadowed: false, isCatalog: true, models: ['deepseek-chat'] }],
+    configured: [{ route: 'deepseek', ref: 'MY-ROUTE_KEY', isCatalog: true, models: ['deepseek-chat'] }],
+    storedCredentials: { 'MY-ROUTE_KEY': 'sk-old' },
     credentialRemoveThrows: true,
   })
   const outcome = await runProviderWizard(deps)
@@ -1065,8 +1180,9 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_DELETE,
     'delete-confirm': { selected: [t('provider-opt-delete-yes')] },
   }, {
-    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', shadowed: false, isCatalog: true, models: ['deepseek-chat'] }],
+    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', isCatalog: true, models: ['deepseek-chat'] }],
     removeProfileThrows: true,
+    storedCredentials: { DEEPSEEK_API_KEY: 'sk-old' },
   })
   const outcome = await runProviderWizard(deps)
   check('30b removeProfile failure: outcome failed', outcome === 'failed', outcome)
@@ -1087,9 +1203,10 @@ function oauthStub(behavior = {}) {
     'delete-confirm': { selected: [t('provider-opt-delete-yes')] },
   }, {
     configured: [
-      { route: 'acme-gateway', ref: 'ACME_SHARED_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] },
-      { route: 'acme-clone', ref: 'ACME_SHARED_KEY', shadowed: false, isCatalog: false, baseURL: 'https://clone.example/v1', api: 'openai-completions', models: ['acme-large'] },
+      { route: 'acme-gateway', ref: 'ACME_SHARED_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] },
+      { route: 'acme-clone', ref: 'ACME_SHARED_KEY', isCatalog: false, baseURL: 'https://clone.example/v1', api: 'openai-completions', models: ['acme-large'] },
     ],
+    storedCredentials: { ACME_SHARED_KEY: 'sk-old' },
   })
   const outcome = await runProviderWizard(deps)
   check('31 delete shared key: outcome deleted', outcome === 'deleted', outcome)
@@ -1115,7 +1232,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_MODELS,
     'models': { selected: ['acme-large', 'acme-small'] },
   }, {
-    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'], modelEntries: [storedEntry] }],
+    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'], modelEntries: [storedEntry] }],
     discovered: [
       { id: 'acme-large', contextWindow: 131072, maxTokens: 8192 },
       { id: 'acme-small', contextWindow: 2048 },
@@ -1146,7 +1263,8 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_DELETE,
     'delete-confirm': { selected: [t('provider-opt-delete-yes')] },
   }, {
-    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', shadowed: false, isCatalog: true, models: ['deepseek-chat'] }],
+    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', isCatalog: true, models: ['deepseek-chat'] }],
+    storedCredentials: { DEEPSEEK_API_KEY: 'sk-old' },
   })
   const outcome = await runProviderWizard(deps)
   check('33 delete reserved ref: outcome deleted', outcome === 'deleted', outcome)
@@ -1168,9 +1286,10 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_DELETE,
     'delete-confirm': { selected: [t('provider-opt-delete-yes')] },
   }, {
-    configured: [{ route: 'my-gateway', ref: 'GATEWAY_SHARED_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['m1'] }],
+    configured: [{ route: 'my-gateway', ref: 'GATEWAY_SHARED_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['m1'] }],
     // Base-inherited consumer, invisible to listConfiguredProviders.
     refUsers: { GATEWAY_SHARED_KEY: ['deepseek'] },
+    storedCredentials: { GATEWAY_SHARED_KEY: 'sk-old' },
   })
   const outcome = await runProviderWizard(deps)
   check('33b delete with hidden base consumer: outcome deleted', outcome === 'deleted', outcome)
@@ -1192,7 +1311,8 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_DELETE,
     'delete-confirm': { selected: [t('provider-opt-delete-yes')] },
   }, {
-    configured: [{ route: 'my-gateway', ref: 'GATEWAY_SHARED_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['m1'] }],
+    configured: [{ route: 'my-gateway', ref: 'GATEWAY_SHARED_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['m1'] }],
+    storedCredentials: { GATEWAY_SHARED_KEY: 'sk-old' },
   })
   const base = deps.host.listRefUsers
   deps.host.listRefUsers = (ref, exceptRoute) => {
@@ -1219,8 +1339,9 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_DELETE,
     'delete-confirm': { selected: [t('provider-opt-delete-yes')] },
   }, {
-    configured: [{ route: 'my-gateway', ref: 'GATEWAY_SHARED_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['m1'] }],
+    configured: [{ route: 'my-gateway', ref: 'GATEWAY_SHARED_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['m1'] }],
     refUsersThrows: true,
+    storedCredentials: { GATEWAY_SHARED_KEY: 'sk-old' },
   })
   const outcome = await runProviderWizard(deps)
   check('33d ref query failure: outcome deleted, credential kept',
@@ -1242,7 +1363,7 @@ function oauthStub(behavior = {}) {
     'apikey': { custom: 'sk-new' },
     'key-overwrite-confirm': { selected: [t('provider-opt-confirm-cancel')] },
   }, {
-    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
+    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
     storedCredentials: { ACME_GATEWAY_API_KEY: 'sk-old' },
     refUsers: { ACME_GATEWAY_API_KEY: ['acme-clone'] },
   })
@@ -1264,7 +1385,7 @@ function oauthStub(behavior = {}) {
     'apikey': { custom: 'sk-new' },
     'key-overwrite-confirm': { selected: [t('provider-opt-key-overwrite-yes')] },
   }, {
-    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
+    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
     storedCredentials: { ACME_GATEWAY_API_KEY: 'sk-old' },
     refUsers: { ACME_GATEWAY_API_KEY: ['acme-clone'] },
   })
@@ -1282,7 +1403,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_KEY,
     'apikey': { custom: 'sk-new' },
   }, {
-    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
+    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
     storedCredentials: { ACME_GATEWAY_API_KEY: 'sk-old' },
   })
   const outcome = await runProviderWizard(deps)
@@ -1304,7 +1425,7 @@ function oauthStub(behavior = {}) {
     'models': { selected: ['acme-large', 'acme-legacy', 'acme-new'] },
   }, {
     configured: [{
-      route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false,
+      route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false,
       baseURL: 'https://gw.example/v1', api: 'openai-completions',
       models: ['acme-large', 'acme-legacy'], modelEntries: [{ id: 'acme-large' }, storedMissing],
     }],
@@ -1330,7 +1451,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_BASEURL,
     'baseurl': { custom: 'https://gw.example/v9' },
   }, {
-    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
+    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: ['acme-large'] }],
   })
   await runProviderWizard(deps)
   const op = calls.mutations[0][1][0]
@@ -1349,7 +1470,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_MODELS,
     'models': { selected: ['deepseek-chat', 'deepseek-v2-alpha'] },
   }, {
-    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', shadowed: false, isCatalog: true, baseURL: 'https://relay.example/v1', models: ['deepseek-chat'], modelEntries: [{ id: 'deepseek-chat' }] }],
+    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', isCatalog: true, baseURL: 'https://relay.example/v1', models: ['deepseek-chat'], modelEntries: [{ id: 'deepseek-chat' }] }],
     storedCredentials: { DEEPSEEK_API_KEY: 'sk-old' },
     discover: request => request.provider !== undefined
       ? [{ id: 'deepseek-chat', name: 'DeepSeek Chat', contextWindow: 1000000 }]
@@ -1394,7 +1515,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_MODELS,
     'models': { selected: ['deepseek-chat', 'deepseek-reasoner'] },
   }, {
-    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', shadowed: false, isCatalog: true, models: ['deepseek-chat'], modelEntries: [{ id: 'deepseek-chat' }] }],
+    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', isCatalog: true, models: ['deepseek-chat'], modelEntries: [{ id: 'deepseek-chat' }] }],
     storedCredentials: { DEEPSEEK_API_KEY: 'sk-old' },
     discover: request => request.provider !== undefined
       ? [{ id: 'deepseek-chat' }, { id: 'deepseek-reasoner' }]
@@ -1424,7 +1545,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_MODELS,
     'models': { selected: ['deepseek-chat'] },
   }, {
-    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', shadowed: false, isCatalog: true, baseURL: 'https://relay.example/v1', models: [] }],
+    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', isCatalog: true, baseURL: 'https://relay.example/v1', models: [] }],
     storedCredentials: { DEEPSEEK_API_KEY: 'sk-old' },
     discover: request => {
       if (request.provider !== undefined) return [{ id: 'deepseek-chat' }]
@@ -1453,7 +1574,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_MODELS,
     'models': { selected: ['acme-large'] },
   }, {
-    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', shadowed: false, isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: [] }],
+    configured: [{ route: 'acme-gateway', ref: 'ACME_GATEWAY_API_KEY', isCatalog: false, baseURL: 'https://gw.example/v1', api: 'openai-completions', models: [] }],
     discover: () => [{ id: 'acme-large' }],
   })
   const outcome = await runProviderWizard(deps)
@@ -1513,7 +1634,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_MODELS,
     'models': { selected: ['or-known'], custom: 'or-online-only' },
   }, {
-    configured: [{ route: 'openrouter', ref: 'OPENROUTER_API_KEY', shadowed: false, isCatalog: true, baseURL: 'https://openrouter.example/v1', models: [] }],
+    configured: [{ route: 'openrouter', ref: 'OPENROUTER_API_KEY', isCatalog: true, baseURL: 'https://openrouter.example/v1', models: [] }],
     storedCredentials: { OPENROUTER_API_KEY: 'sk-old' },
     discover: request => request.provider !== undefined
       ? [{ id: 'or-known', contextWindow: 1000000 }]
@@ -1541,7 +1662,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_MODELS,
     'models': { selected: ['deepseek-chat'] },
   }, {
-    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', shadowed: false, isCatalog: true, baseURL: 'https://relay.example/v1', hasCustomHeaders: true, models: [] }],
+    configured: [{ route: 'deepseek', ref: 'DEEPSEEK_API_KEY', isCatalog: true, baseURL: 'https://relay.example/v1', hasCustomHeaders: true, models: [] }],
     storedCredentials: { DEEPSEEK_API_KEY: 'sk-old' },
     discover: request => request.provider !== undefined
       ? [{ id: 'deepseek-chat' }]
@@ -1567,7 +1688,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_MODELS,
     'models': { selected: ['gpt-live-only'] },
   }, {
-    configured: [{ route: 'openai', ref: 'OPENAI_API_KEY', shadowed: false, isCatalog: true, baseURL: 'https://relay.example/v1', models: [] }],
+    configured: [{ route: 'openai', ref: 'OPENAI_API_KEY', isCatalog: true, baseURL: 'https://relay.example/v1', models: [] }],
     storedCredentials: { OPENAI_API_KEY: 'sk-old' },
     discover: request => request.provider !== undefined
       ? Promise.reject(new Error('catalog unavailable'))
@@ -1599,7 +1720,7 @@ function oauthStub(behavior = {}) {
     'edit-menu': MENU_MODELS,
     'models': { selected: ['claude-live-only'] },
   }, {
-    configured: [{ route: 'anthropic', ref: 'ANTHROPIC_API_KEY', shadowed: false, isCatalog: true, baseURL: 'https://relay.example', models: [] }],
+    configured: [{ route: 'anthropic', ref: 'ANTHROPIC_API_KEY', isCatalog: true, baseURL: 'https://relay.example', models: [] }],
     storedCredentials: { ANTHROPIC_API_KEY: 'sk-ant' },
     discover: request => request.provider !== undefined
       ? [{ id: 'claude-known' }]
@@ -1648,7 +1769,7 @@ const STORED_CAPABILITY_MODEL = {
   name: 'My model', compat: { supportsDeveloperRole: false }, customNote: 'preserve',
 }
 const CAPABILITY_PROVIDER = {
-  route: 'capability-gateway', ref: '', shadowed: false, isCatalog: false,
+  route: 'capability-gateway', ref: '', isCatalog: false,
   api: 'openai-completions', baseURL: 'https://gateway.example/v1',
   models: ['chosen'], modelEntries: [STORED_CAPABILITY_MODEL],
 }
@@ -1700,7 +1821,7 @@ for (const cancelAfterEdits of [true, false]) {
     'edit-menu': MENU_MODELS,
     models: { selected: [], edits: { known: { contextWindow: 200000 } } },
   }, {
-    configured: [{ route: 'openai', ref: '', shadowed: false, isCatalog: true,
+    configured: [{ route: 'openai', ref: '', isCatalog: true,
       modelOverrides: { known: { contextWindow: 4000, compat: { supportsDeveloperRole: false } } } }],
     discovered: [{ id: 'known', contextWindow: 1000000 }, { id: 'other' }],
   })
@@ -1719,7 +1840,7 @@ for (const cancelAfterEdits of [true, false]) {
     'edit-menu': MENU_MODELS,
     models: { selected: ['known', 'other'], edits: { known: { maxTokens: 8192 } } },
   }, {
-    configured: [{ route: 'openai', ref: '', shadowed: false, isCatalog: true, modelOverrides: { known: override } }],
+    configured: [{ route: 'openai', ref: '', isCatalog: true, modelOverrides: { known: override } }],
     discovered: [{ id: 'known' }, { id: 'other' }],
   })
   check('48 modelOverrides migration: updated', await runProviderWizard(deps) === 'updated')
@@ -1774,6 +1895,30 @@ for (const invalid of [
     ...CUSTOM_EDIT, models: { selected: ['chosen'], edits: { chosen: {} } },
   }, { configured: [CAPABILITY_PROVIDER], discovered: [{ id: 'chosen', contextWindow: 800000 }] })
   check('52 no-op capability save: zero writes', await runProviderWizard(deps) === 'cancelled' && calls.mutations.length === 0)
+}
+
+// 53. Key fingerprints: the non-secret structural lead plus three secret
+// characters. A value with no recognizable lead reveals nothing.
+for (const [input, expected] of [
+  ['oc_sk_590abcdefghijklmnop', 'oc_sk_590...'],
+  ['sk-proj-AbCdEf1234567890', 'sk-proj-AbC...'],
+  ['sk_live_51Habcdefghijklm', 'sk_live_51H...'],
+  ['sk-abcdefghijklmnop', 'sk-abc...'],
+  ['ghp_16C7e42FabcdEFGH', 'ghp_16C...'],
+  ['github_pat_11ABCdefGHI', 'github_pat_11A...'],
+  ['glpat-xxxxxxxxxxxxxxxx', 'glpat-xxx...'],
+  ['hf_abcdefghijklmnop', 'hf_abc...'],
+  ['AIzaSyD1234567890abcdef', 'AIzaSyD...'],
+  ['AKIAIOSFODNN7EXAMPLE', 'AKIAIOS...'],
+  ['abc_def_ghi_1234567890', 'abc_def_ghi_123...'],
+  ['590abcdefghijklmnop', undefined],
+  ['aB3_abcdefghijklmnop', undefined],
+  ['sk-short', undefined],
+  ['', undefined],
+  [undefined, undefined],
+]) {
+  const got = keyFingerprint(input)
+  check(`53 fingerprint ${JSON.stringify(input)}`, got === expected, `${got} want ${expected}`)
 }
 
 console.log(failed === 0 ? '\nAll provider-wizard checks passed' : `\n${failed} check(s) FAILED`)

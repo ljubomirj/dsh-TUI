@@ -1307,9 +1307,9 @@ const oauthRow = (provider: string) => ({
     balanceInfo: async () => ({ ok: false, reason: 'no-key' }),
     providerSetup: () => ({
       listConfiguredProviders: () => [
-        { route: 'demo-gw', ref: 'DEMO_GW_API_KEY', shadowed: false, isCatalog: false },
-        { route: 'stale-gw', ref: 'STALE_GW_API_KEY', shadowed: false, isCatalog: false },
-        { route: 'deepseek-official', ref: 'DEEPSEEK_API_KEY', shadowed: false, isCatalog: true },
+        { route: 'demo-gw', ref: 'DEMO_GW_API_KEY', isCatalog: false },
+        { route: 'stale-gw', ref: 'STALE_GW_API_KEY', isCatalog: false },
+        { route: 'deepseek-official', ref: 'DEEPSEEK_API_KEY', isCatalog: true },
       ],
     }),
   })

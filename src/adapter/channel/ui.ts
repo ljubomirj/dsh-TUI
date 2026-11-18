@@ -174,7 +174,7 @@ export function createChannelUi(channel: ChannelUi, mode: AdapterMode, lease: Ch
         return Object.freeze({
           ...methods(base, {
             listCatalogProviders: 'read-only', listConfiguredProviders: 'read-only', listRefUsers: 'read-only',
-            routeExists: 'read-only', envShadows: 'read-only', envValue: 'mutate', readCredential: 'mutate',
+            routeExists: 'read-only', resolveCredential: 'mutate',
             discoverModels: 'mutate', writeCredential: 'mutate', removeCredential: 'mutate',
             writeProfile: 'mutate', mutateProfile: 'mutate', removeProfile: 'mutate',
           }),

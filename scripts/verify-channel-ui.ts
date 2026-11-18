@@ -305,7 +305,7 @@ for (const mode of ['passive-shadow', 'replay-shadow'] as const) {
   assert.throws(() => settings.write('x', []), /shadow policy/)
   assert.throws(() => settings.writeCredential('x', 'secret'), /shadow policy/)
   assert.throws(() => provider.writeProfile('x', {}), /shadow policy/)
-  assert.throws(() => provider.readCredential('x'), /shadow policy/)
+  assert.throws(() => provider.resolveCredential('x'), /shadow policy/)
   assert.throws(() => provider.oauth!.login(), /shadow policy/)
   assert.throws(() => mount.channel.subagentControl.interrupt('child'), /shadow policy/)
   assert.equal(writes.length, 0)

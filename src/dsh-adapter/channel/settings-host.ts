@@ -336,8 +336,9 @@ export function createSettingsHosts(ctx: ServiceLookup, assertActive: () => void
           return settings.mutate(ns, ops, expectedRevision)
         },
         async credentialConfigured(ref) {
-          // The environment shadows the store (providerSetup.envShadows), so
-          // an env-provided key counts as configured.
+          // Any layer counts as configured: the environment fast path covers
+          // a store-less mount, and resolve() ranks a stored value above the
+          // ambient fallbacks.
           if (process.env[ref] !== undefined) return true
           return (await credentials()?.resolve(ref)) !== undefined
         },
@@ -406,7 +407,7 @@ export function createSettingsHosts(ctx: ServiceLookup, assertActive: () => void
         | undefined
       const credentials = ctx.get('credentials') as
         | {
-          resolve(ref: string): Promise<{ value: string } | undefined>
+          resolve(ref: string): Promise<{ value: string; source: string } | undefined>
           set(ref: string, value: string): Promise<void>
           unset(ref: string): Promise<void>
         }
@@ -536,7 +537,6 @@ export function createSettingsHosts(ctx: ServiceLookup, assertActive: () => void
               route,
               ref,
               isCatalog: catalog.has(route),
-              shadowed: ref !== '' && process.env[ref] !== undefined,
               ...(baseURL !== undefined ? { baseURL } : {}),
               ...(api !== undefined ? { api } : {}),
               ...(hasCustomHeaders ? { hasCustomHeaders: true } : {}),
@@ -551,15 +551,18 @@ export function createSettingsHosts(ctx: ServiceLookup, assertActive: () => void
         discoverModels(request) {
           return llm.discoverModels('llm-pi-ai', request)
         },
-        envShadows(ref) {
-          return process.env[ref] !== undefined
-        },
-        envValue(ref) {
-          return process.env[ref]
-        },
-        async readCredential(ref) {
+        async resolveCredential(ref) {
           const resolved = await credentials.resolve(ref)
-          return resolved?.value
+          if (resolved === undefined) return undefined
+          return {
+            value: resolved.value,
+            // The local provider's layer ids: `file` is the managed store
+            // (written through /provider), everything else is an ambient
+            // fallback the product never writes.
+            source: resolved.source === 'file'
+              ? 'stored'
+              : resolved.source === 'env' ? 'environment' : 'env-file',
+          }
         },
         writeCredential(ref, value) {
           return credentials.set(ref, value)

@@ -3,6 +3,21 @@ import type { LlmDiscoveredModel } from './channel-view.js'
 import type { LocalizedDescriptions } from './channel-catalog.js'
 
 /**
+ * Where the key a route would authenticate with comes from. `stored` is the
+ * credentials store written through `/provider`; the other layers are the
+ * ambient fallbacks the credentials service reads below it.
+ */
+export type ProviderCredentialSource = 'stored' | 'environment' | 'env-file'
+
+/** The key a request for one credential ref would use, and its layer. */
+export interface ResolvedProviderCredential {
+  /** The resolved secret; callers only fingerprint it, never render it. */
+  readonly value: string
+  /** The layer that supplied {@link value}. */
+  readonly source: ProviderCredentialSource
+}
+
+/**
  * Runtime capabilities the wizard needs, implemented by the channel over
  * `ctx.settings` / `ctx.credentials` / `ctx.llm`. `undefined` from
  * `channel.providerSetup()` means the bare cordis.yml start (no dsh-base
@@ -36,17 +51,18 @@ export interface ProviderSetupHost {
     api?: string
     apiKey?: string
   }): Promise<readonly LlmDiscoveredModel[]>
-  /** Whether the process environment already provides this ref (shadow). */
-  envShadows(ref: string): boolean
-  /** The process-environment value for a shadowed ref; undefined when absent. */
-  envValue(ref: string): string | undefined
   /**
-   * Read the currently stored value for rollback purposes; undefined when no
-   * credential exists under the ref. Only called when {@link envShadows} is
-   * false, so the value comes from a writable/seeded store, never the env.
+   * Resolve the key a request for `ref` would use, with the layer that
+   * supplied it: a value stored through `/provider` outranks the ambient
+   * environment and `.env` fallbacks, exactly as the credentials service
+   * resolves it. Undefined when no layer provides a value.
    */
-  readCredential(ref: string): Promise<string | undefined>
-  /** Persist the key under the ref; rejects when env-shadowed or invalid. */
+  resolveCredential(ref: string): Promise<ResolvedProviderCredential | undefined>
+  /**
+   * Persist the key under the ref. The stored value outranks the environment,
+   * so this stores an override when the environment also provides the ref;
+   * rejects when the store refuses the write.
+   */
   writeCredential(ref: string, value: string): void | Promise<void>
   /** Best-effort rollback of a just-written credential. */
   removeCredential(ref: string): void | Promise<void>
@@ -80,14 +96,12 @@ export interface CatalogProviderCandidate {
 /**
  * One user-added provider route read from the settings section. The parsed
  * fields drive the edit/delete picker rows, the catalog/custom split
- * (`isCatalog`) and the key-keep question (`ref` + `shadowed`).
+ * (`isCatalog`) and the key-keep question (`ref` + the resolved credential).
  */
 export interface ConfiguredProvider {
   readonly route: string
   /** Credential ref (profile.apiKeyEnv) when the profile names one. */
   readonly ref: string
-  /** Whether the process environment shadows the ref (env-provided key). */
-  readonly shadowed: boolean
   /**
    * Whether the route belongs to the installed catalog — real membership
    * as the llm adapter reports it, never inferred from the profile shape:

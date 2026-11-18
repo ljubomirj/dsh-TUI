@@ -1,4 +1,4 @@
-import type { ProviderSetupHost, CatalogProviderCandidate, ConfiguredProvider, ProfilePathOp, OAuthSetupHost, OAuthProviderStatus, OAuthLoginResult, ProviderModelEditor } from '../adapter/ports/channel-settings.js'
+import type { ProviderSetupHost, CatalogProviderCandidate, ConfiguredProvider, ProfilePathOp, OAuthSetupHost, OAuthProviderStatus, OAuthLoginResult, ProviderModelEditor, ResolvedProviderCredential } from '../adapter/ports/channel-settings.js'
 export type { ProviderSetupHost, CatalogProviderCandidate, ConfiguredProvider, ProfilePathOp, OAuthSetupHost, OAuthProviderStatus, OAuthLoginResult } from '../adapter/ports/channel-settings.js'
 /**
  * `/provider` wizard — interactively adds, edits, or deletes an LLM
@@ -13,7 +13,10 @@ export type { ProviderSetupHost, CatalogProviderCandidate, ConfiguredProvider, P
  *             the section and registers the route without a restart)
  *   key     → credentials store (`~/.dsh/.credentials.yaml`, 0600), named by
  *             the derived `<ROUTE>_API_KEY` env-style ref the profile's
- *             `apiKeyEnv` points at
+ *             `apiKeyEnv` points at. An ambient key from that ref stays the
+ *             default; a key pasted in the wizard is stored as an override
+ *             (the store outranks the environment) and is displayed only as a
+ *             fingerprint, e.g. `oc_sk_590...`.
  *
  * The module is React-free so `scripts/verify-provider-wizard.mjs` can drive
  * it headless with a stubbed host and scripted answers.
@@ -21,6 +24,7 @@ export type { ProviderSetupHost, CatalogProviderCandidate, ConfiguredProvider, P
 
 import { t } from '../i18n.js'
 import { isReservedCredentialRef } from './credentialRefGuard.js'
+import { keyFingerprint } from '../utils/keyFingerprint.js'
 import {
   UserQuestionError,
   type AskUserQuestionAnswer,
@@ -81,6 +85,64 @@ function answerText(answer: AskUserQuestionAnswer, id: string): string {
 
 function answerSelected(answer: AskUserQuestionAnswer, id: string): readonly string[] {
   return answer.answers.find(item => item.id === id)?.selected ?? []
+}
+
+/**
+ * Parenthetical fingerprint of a resolved key, e.g. ` (oc_sk_590...)`.
+ * Empty when the value has no recognizable structural lead, so templates can
+ * append it unconditionally without leaving empty brackets behind.
+ */
+function keyHint(value: string | undefined): string {
+  const fingerprint = keyFingerprint(value)
+  return fingerprint === undefined ? '' : t('provider-hint-wrap', { hint: fingerprint })
+}
+
+/** Compact key state for a picker row or the edit menu. */
+function keyStateLine(ref: string, credential: ResolvedProviderCredential | undefined): string {
+  if (credential === undefined) return t('provider-row-key-none')
+  const hint = keyHint(credential.value)
+  return credential.source === 'stored'
+    ? t('provider-row-key-stored', { ref, hint })
+    : credential.source === 'environment'
+      ? t('provider-row-key-env', { ref, hint })
+      : t('provider-row-key-env-file', { hint })
+}
+
+/** Key line for a confirm preview or result summary. */
+function keySummaryLine(ref: string, credential: ResolvedProviderCredential | undefined): string {
+  if (credential === undefined) return t('provider-line-key-missing', { ref })
+  const hint = keyHint(credential.value)
+  return credential.source === 'stored'
+    ? t('provider-line-key-stored', { ref, hint })
+    : credential.source === 'environment'
+      ? t('provider-line-key-env', { ref, hint })
+      : t('provider-line-key-env-file', { ref, hint })
+}
+
+/**
+ * Detail for the API-key question: what is in effect now and what an empty
+ * answer does. `adding` words the same fact as a default for a new route.
+ */
+function keyQuestionDetail(
+  ref: string,
+  credential: ResolvedProviderCredential | undefined,
+  adding: boolean,
+): string {
+  if (credential === undefined) return t('provider-q-apikey-none', { ref })
+  const hint = keyHint(credential.value)
+  if (credential.source === 'stored') {
+    return adding
+      ? t('provider-q-apikey-existing-stored', { ref, hint })
+      : t('provider-q-apikey-current-stored', { ref, hint })
+  }
+  const env = credential.source === 'environment'
+  return adding
+    ? env
+      ? t('provider-q-apikey-default-env', { ref, hint })
+      : t('provider-q-apikey-default-env-file', { ref, hint })
+    : env
+      ? t('provider-q-apikey-current-env', { ref, hint })
+      : t('provider-q-apikey-current-env-file', { ref, hint })
 }
 
 /**
@@ -243,15 +305,21 @@ async function runAddFlow(
   }
 
   // ── 3. API key (own batch so redact covers exactly the secret) ─────
+  // The ambient key stays the default; a pasted key is stored as an override
+  // and takes precedence at request time.
   const ref = deriveKeyRef(route)
-  const shadowed = host.envShadows(ref)
+  const existing = await host.resolveCredential(ref)
   const keyAnswer = await ask({
-    questions: [textQuestion('apikey', t('provider-q-apikey'), t('provider-q-apikey-detail'))],
+    questions: [textQuestion('apikey', t('provider-q-apikey'), keyQuestionDetail(ref, existing, true))],
   }, { redact: true })
   const apiKey = answerText(keyAnswer, 'apikey')
-  const keyLine = shadowed
-    ? t('provider-line-keyref-env', { ref })
-    : t('provider-line-keyref', { ref })
+  const willStore = apiKey !== ''
+  const previewKeyLine = willStore
+    ? t('provider-line-key-will-store', { ref, hint: keyHint(apiKey) })
+    : keySummaryLine(ref, existing)
+  const resultKeyLine = willStore
+    ? t('provider-line-key-stored', { ref, hint: keyHint(apiKey) })
+    : keySummaryLine(ref, existing)
 
   // ── 4. endpoint / protocol ─────────────────────────────────────────
   let baseURL: string | undefined
@@ -285,12 +353,15 @@ async function runAddFlow(
   }
 
   // ── 5. model discovery (draft credential, nothing persisted) ───────
+  // A pasted key wins; otherwise the ambient default the route will use is
+  // the draft credential, so an env-provided route can still list live models.
+  const discoveryKey = apiKey !== '' ? apiKey : existing?.value
   notify(t('provider-discovery-running'))
   const discovery = await discoverRouteModels(host, {
     ...(isCatalog ? { provider: route } : {}),
     ...(baseURL !== undefined && baseURL !== '' ? { baseURL } : {}),
     ...(api !== undefined ? { api } : {}),
-    ...(apiKey !== undefined && apiKey !== '' ? { apiKey } : {}),
+    ...(discoveryKey !== undefined ? { apiKey: discoveryKey } : {}),
   })
   const discovered = discovery.rows
   notifyDiscoveryStatus(notify, discovery)
@@ -353,11 +424,11 @@ async function runAddFlow(
 
   // ── 7. confirm ─────────────────────────────────────────────────────
   const summaryLines = buildSummaryLines({
-    route, action: 'added', ref, shadowed, baseURL, api, models, isCatalog, keyLine,
+    route, action: 'added', keyLine: resultKeyLine, baseURL, api, models, isCatalog,
     capabilityModels: wholeCatalogCapabilityEdits,
   })
   const previewLines = buildSummaryLines({
-    route, action: 'preview', ref, shadowed, baseURL, api, models, isCatalog, keyLine,
+    route, action: 'preview', keyLine: previewKeyLine, baseURL, api, models, isCatalog,
     capabilityModels: wholeCatalogCapabilityEdits,
   })
   const detail = host.routeExists(route)
@@ -377,11 +448,14 @@ async function runAddFlow(
   // ── 8. persist: credential first (rollbackable), then the profile ──
   let wroteCredential = false
   let previousCredential: string | undefined
-  if (!shadowed && apiKey !== undefined) {
-    // Capture any pre-existing value BEFORE overwriting: when the profile
-    // write below fails, rollback must restore it — an unconditional unset
-    // would destroy the old key of the route being overwritten.
-    previousCredential = await host.readCredential(ref)
+  if (willStore) {
+    // Capture any pre-existing STORED value BEFORE overwriting: when the
+    // profile write below fails, rollback must restore it — an unconditional
+    // unset would destroy the old key of the route being overwritten. An
+    // ambient value is not captured: copying it into the store would turn a
+    // rollback into a silent override.
+    const beforeWrite = await host.resolveCredential(ref)
+    previousCredential = beforeWrite?.source === 'stored' ? beforeWrite.value : undefined
     await host.writeCredential(ref, apiKey)
     wroteCredential = true
   }
@@ -458,16 +532,19 @@ async function runEditWizard(
     notify(t('provider-none-configured'), { color: 'warning' })
     return 'cancelled'
   }
+  const credentials = await Promise.all(configured.map(provider => provider.ref === ''
+    ? Promise.resolve(undefined)
+    : host.resolveCredential(provider.ref)))
   const pickAnswer = await ask({
-    questions: [optionQuestion('edit-provider', t('provider-q-edit'), configured.map(provider => ({
+    questions: [optionQuestion('edit-provider', t('provider-q-edit'), configured.map((provider, index) => ({
       label: provider.route,
-      description: providerRowDescription(provider),
+      description: providerRowDescription(provider, credentials[index]),
     })), { hideCustomInput: true })],
   })
   const route = answerSelected(pickAnswer, 'edit-provider')[0]
-  const existing = configured.find(row => row.route === route)
-  if (existing === undefined) return 'cancelled'
-  return runEditMenu(deps, existing)
+  const index = configured.findIndex(row => row.route === route)
+  if (index < 0) return 'cancelled'
+  return runEditMenu(deps, configured[index]!, credentials[index])
 }
 
 /**
@@ -479,16 +556,17 @@ async function runEditWizard(
 async function runEditMenu(
   deps: ProviderWizardDeps,
   provider: ConfiguredProvider,
+  credential: ResolvedProviderCredential | undefined,
 ): Promise<ProviderWizardOutcome> {
   const { ask, notify } = deps
   const menuAnswer = await ask({
     questions: [optionQuestion('edit-menu', t('provider-q-edit-menu', { route: provider.route }),
-      buildEditMenuOptions(provider),
+      buildEditMenuOptions(provider, credential),
       { hideCustomInput: true })],
   })
   const picked = answerSelected(menuAnswer, 'edit-menu')[0]
   if (picked === t('provider-opt-edit-delete')) return deleteConfiguredProvider(deps, provider)
-  if (picked === t('provider-opt-edit-key')) return editApiKey(deps, provider)
+  if (picked === t('provider-opt-edit-key')) return editApiKey(deps, provider, credential)
   if (picked === t('provider-opt-edit-baseurl')) return editBaseUrl(deps, provider)
   if (picked === t('provider-opt-edit-protocol')) return editWireProtocol(deps, provider)
   if (picked === t('provider-opt-edit-models')) return editModelList(deps, provider)
@@ -499,11 +577,16 @@ async function runEditMenu(
 /** Menu rows for one edit session; base URL / protocol are custom-only.
  *  The catalog split reads the route's real catalog membership — an
  *  explicit `api` override on a built-in route does not make it custom. */
-function buildEditMenuOptions(provider: ConfiguredProvider): { label: string; description?: string }[] {
+function buildEditMenuOptions(
+  provider: ConfiguredProvider,
+  credential: ResolvedProviderCredential | undefined,
+): { label: string; description?: string }[] {
   const isCatalog = provider.isCatalog
   const options: { label: string; description?: string }[] = [
     { label: t('provider-opt-edit-key'),
-      ...(provider.shadowed ? { description: t('provider-row-key-shadowed') } : {}) },
+      description: provider.ref === ''
+        ? t('provider-row-key-none')
+        : keyStateLine(provider.ref, credential) },
   ]
   if (!isCatalog) {
     options.push(
@@ -521,12 +604,15 @@ function buildEditMenuOptions(provider: ConfiguredProvider): { label: string; de
   return options
 }
 
-/** Replace the route's API key: prompt, then write the credential at once.
- *  An env-shadowed key cannot be edited from here; an empty answer is a
- *  no-op. The profile already points at the ref, so no profile write. */
+/** Replace or override the route's API key: prompt, then write the
+ *  credential at once. An ambient key is the default and stays in effect on
+ *  an empty answer; a pasted key is stored, and the store outranks the
+ *  environment at request time. The profile already points at the ref, so no
+ *  profile write. */
 async function editApiKey(
   deps: ProviderWizardDeps,
   provider: ConfiguredProvider,
+  credential: ResolvedProviderCredential | undefined,
 ): Promise<ProviderWizardOutcome> {
   const { ask, notify, pushLocal, host } = deps
   if (provider.ref === '') {
@@ -536,19 +622,13 @@ async function editApiKey(
     notify(t('provider-key-no-ref', { route: provider.route }), { color: 'warning' })
     return 'cancelled'
   }
-  if (provider.shadowed) {
-    // The environment provides the key: it cannot be edited from here and
-    // a store write would never be read at request time anyway.
-    notify(t('provider-key-env-not-editable', { route: provider.route, ref: provider.ref }),
-      { color: 'warning' })
-    return 'cancelled'
-  }
   const keyAnswer = await ask({
-    questions: [textQuestion('apikey', t('provider-q-apikey'), t('provider-q-apikey-detail'))],
+    questions: [textQuestion('apikey', t('provider-q-apikey'),
+      keyQuestionDetail(provider.ref, credential, false))],
   }, { redact: true })
   const value = answerText(keyAnswer, 'apikey')
   if (value === '') {
-    notify(t('provider-key-empty'), { color: 'warning' })
+    notify(t('provider-key-kept', { ref: provider.ref }))
     return 'cancelled'
   }
   // The ref is only a name: writing it replaces the key for EVERY profile
@@ -586,13 +666,11 @@ async function editApiKey(
   pushLocal('/provider', buildSummaryLines({
     route: provider.route,
     action: 'updated',
-    ref: provider.ref,
-    shadowed: provider.shadowed,
+    keyLine: t('provider-line-key-stored', { ref: provider.ref, hint: keyHint(value) }),
     baseURL: provider.baseURL,
     api: provider.api,
     models: provider.models ?? [],
     isCatalog: provider.isCatalog,
-    keyLine: t('provider-line-key-updated', { ref: provider.ref }),
   }))
   notify(t('provider-edit-success', { route: provider.route }), { color: 'success' })
   return 'updated'
@@ -615,15 +693,13 @@ async function patchProfileField(
   pushLocal('/provider', buildSummaryLines({
     route: provider.route,
     action: 'updated',
-    ref: provider.ref,
-    shadowed: provider.shadowed,
+    keyLine: provider.ref !== ''
+      ? t('provider-line-key-kept', { ref: provider.ref })
+      : t('provider-line-key-none'),
     baseURL: change.baseURL ?? provider.baseURL,
     api: change.api ?? provider.api,
     models: provider.models ?? [],
     isCatalog: provider.isCatalog,
-    keyLine: provider.ref !== ''
-      ? t('provider-line-key-kept', { ref: provider.ref })
-      : t('provider-line-key-none'),
   }))
   notify(t('provider-edit-success', { route: provider.route }), { color: 'success' })
   return 'updated'
@@ -698,7 +774,7 @@ async function editModelList(
     && !provider.hasCustomHeaders
     && (!isCatalog || provider.api !== undefined || catalogLiveApi(provider.route) !== undefined)
   const key = provider.ref !== '' && liveProbePossible
-    ? (provider.shadowed ? host.envValue(provider.ref) : await host.readCredential(provider.ref))
+    ? (await host.resolveCredential(provider.ref))?.value
     : undefined
   notify(t('provider-discovery-running'))
   const discovery = await discoverRouteModels(host, {
@@ -814,8 +890,6 @@ async function editModelList(
   pushLocal('/provider', buildSummaryLines({
     route: provider.route,
     action: 'updated-models',
-    ref: provider.ref,
-    shadowed: provider.shadowed,
     baseURL: provider.baseURL,
     api: provider.api,
     models,
@@ -841,14 +915,14 @@ function sameModels(a: readonly string[], b: readonly string[] | undefined): boo
 
 /**
  * Delete one configured route from inside the edit menu: confirm against a
- * summary, then unset the profile. The credential goes afterwards, as pure
- * best-effort cleanup — only when it is this route's own (not env-provided,
- * not shared with another profile). Unsetting the profile is the catalog
- * change: once it landed, every cleanup path still reports 'deleted' (with
- * an honest transcript line for what survived), so a failed key removal
- * never leaves the UI serving a stale model completion for a route that is
- * already gone. `failed` is reserved for the profile unset itself failing,
- * which really did change nothing.
+ * summary, then unset the profile. The stored credential goes afterwards, as
+ * pure best-effort cleanup — only when this route's key lives in the store
+ * (an ambient key is not ours to remove) and is not shared with another
+ * profile. Unsetting the profile is the catalog change: once it landed, every
+ * cleanup path still reports 'deleted' (with an honest transcript line for
+ * what survived), so a failed key removal never leaves the UI serving a stale
+ * model completion for a route that is already gone. `failed` is reserved for
+ * the profile unset itself failing, which really did change nothing.
  */
 async function deleteConfiguredProvider(
   deps: ProviderWizardDeps,
@@ -865,7 +939,9 @@ async function deleteConfiguredProvider(
   const sharers = provider.ref === ''
     ? []
     : host.listRefUsers(provider.ref, provider.route)
-  const previewLines = buildDeleteSummary(provider)
+  const credential = provider.ref === '' ? undefined : await host.resolveCredential(provider.ref)
+  const previewLines = buildDeleteSummary(provider,
+    provider.ref === '' ? t('provider-line-key-none') : keySummaryLine(provider.ref, credential))
   let confirmAnswer: AskUserQuestionAnswer
   try {
     confirmAnswer = await ask({
@@ -907,8 +983,13 @@ async function deleteConfiguredProvider(
   ]
   let keyCleanupFailed = false
   if (provider.ref !== '') {
-    if (provider.shadowed) {
-      pushedLines.push(t('provider-line-deleted-key-shadowed', { ref: provider.ref }))
+    // Re-resolve AFTER the profile unset: only a value still coming from the
+    // store is ours to remove, and the store may have changed while the
+    // confirm was up. An ambient key stays where it is; deleting the profile
+    // cannot delete an environment variable.
+    const current = await host.resolveCredential(provider.ref)
+    if (current?.source !== 'stored') {
+      pushedLines.push(t('provider-line-deleted-key-ambient', { ref: provider.ref }))
     } else if (isReservedCredentialRef(provider.ref)) {
       // Host-owned credential namespace (the harness's own main key lives
       // here): never removed as a side effect of deleting a route.
@@ -953,19 +1034,22 @@ async function deleteConfiguredProvider(
 }
 
 /** Short picker-row description for one configured provider. */
-function providerRowDescription(provider: ConfiguredProvider): string {
+function providerRowDescription(
+  provider: ConfiguredProvider,
+  credential: ResolvedProviderCredential | undefined,
+): string {
   const parts: string[] = []
   if (provider.baseURL !== undefined) parts.push(provider.baseURL)
   parts.push(provider.models !== undefined && provider.models.length > 0
     ? t('provider-row-models', { n: provider.models.length })
     : t('provider-row-catalog'))
-  if (provider.shadowed) parts.push(t('provider-row-key-shadowed'))
+  parts.push(provider.ref === '' ? t('provider-row-key-none') : keyStateLine(provider.ref, credential))
   return parts.join(' · ')
 }
 
-/** Confirm-summary lines for the delete branch (reuses the shared keyref
- *  and models lines; no credential values are ever rendered). */
-function buildDeleteSummary(provider: ConfiguredProvider): string[] {
+/** Confirm-summary lines for the delete branch (reuses the shared key-state
+ *  line; credential values are never rendered). */
+function buildDeleteSummary(provider: ConfiguredProvider, keyLine: string): string[] {
   const lines = [t('provider-line-route', { route: provider.route })]
   if (provider.baseURL !== undefined && provider.baseURL !== '') {
     const endpoint = t('provider-line-endpoint', { url: provider.baseURL })
@@ -974,11 +1058,7 @@ function buildDeleteSummary(provider: ConfiguredProvider): string[] {
       : endpoint)
   }
   lines.push(modelsSummaryLine(provider.models ?? [], undefined))
-  if (provider.ref !== '') {
-    lines.push(provider.shadowed
-      ? t('provider-line-keyref-env', { ref: provider.ref })
-      : t('provider-line-keyref', { ref: provider.ref }))
-  }
+  if (provider.ref !== '') lines.push(keyLine)
   return lines
 }
 
@@ -1279,14 +1359,12 @@ function buildSummaryLines(input: {
   route: string
   /** Outcome verb for the first line (what this run actually did). */
   action: 'added' | 'updated' | 'updated-models' | 'preview'
-  ref: string
-  shadowed: boolean
+  /** The key line for this outcome: its source, or that a new one will be stored. */
+  keyLine: string
   baseURL: string | undefined
   api: string | undefined
   models: readonly string[]
   isCatalog: boolean
-  /** Key line override (kept / updated / env); add mode derives it. */
-  keyLine?: string
   /** Model-list delta against the previously enabled set (model-list edits). */
   delta?: { added: readonly string[]; removed: readonly string[] }
   capabilityModels?: readonly string[]
@@ -1298,11 +1376,7 @@ function buildSummaryLines(input: {
     : input.action === 'updated-models'
       ? t('provider-line-action-updated-models', { route: input.route })
       : t('provider-line-action-updated', { route: input.route })]
-  lines.push((input.action === 'preview' && !input.shadowed && input.ref !== ''
-    ? t('provider-line-keyref-preview', { ref: input.ref })
-    : undefined) ?? input.keyLine ?? (input.shadowed
-    ? t('provider-line-keyref-env', { ref: input.ref })
-    : t('provider-line-keyref', { ref: input.ref })))
+  lines.push(input.keyLine)
   if (input.baseURL !== undefined && input.baseURL !== '') {
     // The wire protocol rides the endpoint line: it only ever varies per
     // endpoint, and a lone protocol row reads as filler.
