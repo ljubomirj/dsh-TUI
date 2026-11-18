@@ -26,6 +26,9 @@ import { join } from 'node:path'
 const fakeHome = mkdtempSync(join(tmpdir(), 'verify-status-fields-'))
 process.env.HOME = fakeHome
 process.env.USERPROFILE = fakeHome
+// The advisor footer field reads $DSH_HOME/advisor/state.json; without this
+// the battery would render a machine's real advisor route.
+delete process.env.DSH_HOME
 process.env.DSH_TUI_LANG = 'zh'
 // Colour on: the tone cases assert themed cells, and the zero-footprint case
 // compares real frames rather than plain text.

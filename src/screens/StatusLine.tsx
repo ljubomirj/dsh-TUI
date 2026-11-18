@@ -6,6 +6,7 @@ import { t } from '../i18n.js'
 import { applyPluginFieldsOrder, formatContextUsage, DEFAULT_STATUS_BAR, normalizeStatusBar, type StatusBarConfig } from '../tuiDisplayPrefs.js'
 import { estimateSessionCostSnapshotCny, isDeepSeekOfficialProvider, isPeakHour } from '../deepseekPricing.js'
 import { getActiveBrand } from '../branding.js'
+import { advisorStatusText } from './AdvisorStatus.js'
 import { ActivityLine, contextPressurePct, type ActivityLineValue } from '../components/ActivityLine.js'
 import { formatClock } from '../trajectory/format.js'
 import { GoalStatusChip } from '../components/GoalTodoPanel.js'
@@ -482,6 +483,7 @@ const selectionBadge = formatSelectionBadge(channel.selection)
   // takes. A DSH session's id is its agent id; stub channels
   // without a session ref fall back to the agent id.
   const sessionShortId = channel.sessionRef?.sessionId ?? channel.agentId
+  const advisorText = advisorStatusText()
   // Background-job chip (ctx.jobs; /jobs): live count of running/stopping
   // jobs, shown only while non-zero — a silent zero is not information.
   // Not preference-gated: it is transient situational state like the goal
@@ -513,7 +515,7 @@ const selectionBadge = formatSelectionBadge(channel.selection)
   const builtinLeft: FieldPart[] = [
     ...(startingPart !== undefined ? [startingPart] : []),
     ...(statusBar.model
-      ? [{ key: 'model', id: 'model' as const, flexShrink: 0, ...(modelPicker === undefined ? {} : { onClick: modelPicker.onOpen }), node: <Text color="inactiveShimmer">{channel.modelDisplay ?? channel.model}</Text> }]
+      ? [{ key: 'model', id: 'model' as const, flexShrink: 0, ...(modelPicker === undefined ? {} : { onClick: modelPicker.onOpen }), node: <Text color="inactiveShimmer">{[channel.provider, channel.modelDisplay ?? channel.model].filter(part => part !== undefined && part !== '').join(' · ')}</Text> }]
       : []),
     ...(tpsPart !== undefined ? [tpsPart] : []),
     ...(jobsPart !== undefined ? [jobsPart] : []),
@@ -626,6 +628,14 @@ const selectionBadge = formatSelectionBadge(channel.selection)
           // overflows; the tooltip carries the full string.
           tooltip: channel.sessionTitle,
           node: <Text dimColor>{channel.sessionTitle}</Text>,
+        }]
+      : []),
+    // Advisor route: the reviewer's own provider · model · effort, read
+    // from the engine plugin's state file; hidden when the advisor is off.
+    ...(advisorText !== undefined
+      ? [{
+          key: 'advisor',
+          node: <Text dimColor wrap="truncate">{advisorText}</Text>,
         }]
       : []),
     // Short id last: a provenance tag trails the content it identifies, and
