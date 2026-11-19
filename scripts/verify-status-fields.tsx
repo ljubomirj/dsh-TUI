@@ -17,7 +17,7 @@
  *
  * Run: node --import tsx/esm scripts/verify-status-fields.tsx
  */
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -979,6 +979,56 @@ try {
       rig.term.dispose()
       await fiber.dispose()
     }
+  }
+
+  // R17 — the model segment IS the route: `provider/model:effort`, the one
+  // spelling `/model` and `/status` also use. The effort rides the token
+  // (never a segment of its own), and `statusBar.thinking` is its switch.
+  {
+    const { formatModelRoute } = await import('../src/modelRoute.js')
+    check('R17 route: provider/model:effort',
+      formatModelRoute({ provider: 'p', model: 'm', effort: 'high' }) === 'p/m:high',
+      formatModelRoute({ provider: 'p', model: 'm', effort: 'high' }))
+    check('R17 route: no provider renders the bare model',
+      formatModelRoute({ model: 'm', effort: 'high' }) === 'm:high',
+      formatModelRoute({ model: 'm', effort: 'high' }))
+    check('R17 route: no effort stops at the model',
+      formatModelRoute({ provider: 'p', model: 'm' }) === 'p/m',
+      formatModelRoute({ provider: 'p', model: 'm' }))
+    check('R17 route: empty effort is the route default',
+      formatModelRoute({ provider: 'p', model: 'm', effort: '' }) === 'p/m',
+      formatModelRoute({ provider: 'p', model: 'm', effort: '' }))
+
+    const shown = statusRow(await capture(100, {}, channelWith({ thinking: true }, { reasoningEffort: 'high' })))
+    check('R17 footer shows the route token', shown.includes('test-provider/MODELX:high'), JSON.stringify(shown))
+    // A separate effort segment would carry the level a second time.
+    check('R17 the effort appears exactly once', shown.split('high').length - 1 === 1, JSON.stringify(shown))
+
+    const hidden = statusRow(await capture(100, {}, channelWith({ thinking: false }, { reasoningEffort: 'high' })))
+    check('R17 the thinking switch hides the suffix',
+      hidden.includes('test-provider/MODELX') && !hidden.includes(':high'), JSON.stringify(hidden))
+  }
+
+  // R18 — the advisor route rides the right group in the same spelling, read
+  // from the engine plugin's state file (mtime-cached, so this case runs last
+  // and writes the file only now).
+  {
+    const dir = join(fakeHome, '.dsh', 'advisor')
+    mkdirSync(dir, { recursive: true })
+    const stateFile = join(dir, 'state.json')
+    writeFileSync(stateFile, JSON.stringify({
+      enabled: true,
+      effective: { provider: 'review-provider', model: 'REVIEWX', effort: 'max' },
+    }))
+    const row = statusRow(await capture(100, {}))
+    check('R18 advisor route renders provider/model:effort',
+      row.includes('review-provider/REVIEWX:max'), JSON.stringify(row))
+    check('R18 advisor follows the cwd (right group, after location)',
+      row.indexOf('uniqdir') < row.indexOf('review-provider/REVIEWX:max'), JSON.stringify(row))
+
+    writeFileSync(stateFile, JSON.stringify({ enabled: false, effective: { provider: 'review-provider', model: 'REVIEWX', effort: 'max' } }))
+    const off = statusRow(await capture(100, {}))
+    check('R18 a disabled advisor hides the field', !off.includes('REVIEWX'), JSON.stringify(off))
   }
 
   await root.fiber.dispose()

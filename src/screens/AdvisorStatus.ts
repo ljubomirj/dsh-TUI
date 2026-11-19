@@ -8,6 +8,7 @@
 import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { formatModelRoute } from '../modelRoute.js'
 
 interface AdvisorStateFile {
   enabled?: unknown
@@ -27,9 +28,10 @@ interface AdvisorCache {
 let cache: AdvisorCache | undefined
 
 /**
- * The advisor footer text — `provider · model · effort` when the advisor is
- * enabled, absent otherwise. Effort `''` (the route default) omits the third
- * segment; a missing or pre-effective state file hides the field.
+ * The advisor footer text — `provider/model:effort`, the same spelling as the
+ * main model segment — when the advisor is enabled, absent otherwise. Effort
+ * `''` (the route default) stops at the model; a missing or pre-effective
+ * state file hides the field.
  * @returns the text to render, or `undefined` when there is nothing to show.
  */
 export function advisorStatusText(): string | undefined {
@@ -48,10 +50,11 @@ export function advisorStatusText(): string | undefined {
     if (state.enabled === true
       && typeof effective?.provider === 'string'
       && typeof effective?.model === 'string') {
-      const effort = typeof effective?.effort === 'string' ? effective.effort : ''
-      text = effort === ''
-        ? `${effective.provider} · ${effective.model}`
-        : `${effective.provider} · ${effective.model} · ${effort}`
+      text = formatModelRoute({
+        provider: effective.provider,
+        model: effective.model,
+        effort: typeof effective?.effort === 'string' ? effective.effort : undefined,
+      })
     }
   } catch {
     // A partial write leaves the last good snapshot; a malformed file is the

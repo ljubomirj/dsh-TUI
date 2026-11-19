@@ -7,6 +7,7 @@ import { applyPluginFieldsOrder, formatContextUsage, DEFAULT_STATUS_BAR, normali
 import { estimateSessionCostSnapshotCny, isDeepSeekOfficialProvider, isPeakHour } from '../deepseekPricing.js'
 import { getActiveBrand } from '../branding.js'
 import { advisorStatusText } from './AdvisorStatus.js'
+import { formatModelRoute } from '../modelRoute.js'
 import { ActivityLine, contextPressurePct, type ActivityLineValue } from '../components/ActivityLine.js'
 import { formatClock } from '../trajectory/format.js'
 import { GoalStatusChip } from '../components/GoalTodoPanel.js'
@@ -121,7 +122,6 @@ const FIELD_TONE_COLOR: Record<
 type BuiltinHoverTarget =
   | 'ctx'
   | 'mode'
-  | 'effort'
   | 'cache'
   | 'tps'
   | 'tokens'
@@ -224,7 +224,6 @@ export function StatusLine({
   helpOpen = false,
   backendMode,
   modelPicker,
-  effortPicker,
   wake,
   activity: projectedActivity,
   pluginFields,
@@ -260,12 +259,6 @@ export function StatusLine({
    *  absent = the segment renders exactly as before, and its hover detail
    *  keeps the pure route readout without the click affordance line. */
   modelPicker?: {
-    readonly onOpen: () => void
-  }
-  /** Same contract for the think-level segment and /effort: present only
-   *  when the backend serves the effort capability. The hover id rides
-   *  with it — the segment's whole detail line IS the affordance. */
-  effortPicker?: {
     readonly onOpen: () => void
   }
   /** Activity value published by the working-activity plugin for this session.
@@ -334,16 +327,6 @@ export function StatusLine({
   const contextWindow = occupancy?.contextWindow
   const contextParts: FieldPart[] = []
 
-  if (statusBar.thinking && channel.reasoningEffort !== undefined) {
-    contextParts.push({
-      key: 'effort',
-      // The hover id rides only with the click target: the segment's whole
-      // detail line IS the affordance (level + /effort), so promising it
-      // without the picker behind it would be a lie.
-      ...(effortPicker === undefined ? {} : { id: 'effort' as const, onClick: effortPicker.onOpen }),
-      node: <Text color="inactiveShimmer">{channel.reasoningEffort}</Text>,
-    })
-  }
   const modeNeedsExplicitMarker = channel.mode.plan === true
     || channel.mode.sandbox === 'danger-full-access'
     || channel.mode.approval === 'never'
@@ -515,7 +498,21 @@ const selectionBadge = formatSelectionBadge(channel.selection)
   const builtinLeft: FieldPart[] = [
     ...(startingPart !== undefined ? [startingPart] : []),
     ...(statusBar.model
-      ? [{ key: 'model', id: 'model' as const, flexShrink: 0, ...(modelPicker === undefined ? {} : { onClick: modelPicker.onOpen }), node: <Text color="inactiveShimmer">{[channel.provider, channel.modelDisplay ?? channel.model].filter(part => part !== undefined && part !== '').join(' · ')}</Text> }]
+      ? [{
+          key: 'model',
+          id: 'model' as const,
+          flexShrink: 0,
+          ...(modelPicker === undefined ? {} : { onClick: modelPicker.onOpen }),
+          // The route, not a decorated name: `provider/model:effort` is what
+          // /model takes back, so the footer can be typed verbatim. The
+          // effort rides the token (never a segment of its own), and
+          // `statusBar.thinking` is the switch for showing it at all.
+          node: <Text color="inactiveShimmer">{formatModelRoute({
+            provider: channel.provider,
+            model: channel.model,
+            effort: statusBar.thinking ? channel.reasoningEffort : undefined,
+          })}</Text>,
+        }]
       : []),
     ...(tpsPart !== undefined ? [tpsPart] : []),
     ...(jobsPart !== undefined ? [jobsPart] : []),
@@ -954,16 +951,6 @@ function buildHoverDetail(
         </Text>
       )
     }
-    case 'effort': {
-      // The think-level segment's whole detail line IS the affordance (the
-      // hover id rides with the click target — see the field above), so the
-      // case is unreachable without the picker behind it.
-      return (
-        <Text wrap="truncate">
-          {dim('effort ')}{channel.reasoningEffort} · {t('status-detail-effort')}
-        </Text>
-      )
-    }
     case 'cache': {
       const rate = formatCacheHitRate(usage)
       if (usage === undefined || rate === undefined) return null
@@ -1100,17 +1087,21 @@ function buildHoverDetail(
       )
     }
     case 'model': {
-      // When a display name masks the raw id (modelDisplay maps a
-      // friendly/alias name), the hover shows BOTH — the requested alias the
-      // user picked and the raw id the route runs. Identical strings render
-      // once; nothing is invented when no mapping is known.
+      // The route in full, in the footer's own spelling. When a display name
+      // masks the raw id (modelDisplay maps a friendly/alias name) the hover
+      // adds it beside the route: the alias the user picked and the route it
+      // runs are different facts. Nothing is invented when no mapping is
+      // known.
       return (
         <Text wrap="truncate">
-          {dim('model ')}{channel.modelDisplay ?? channel.model}
+          {dim('model ')}{formatModelRoute({
+            provider: channel.provider,
+            model: channel.model,
+            effort: channel.reasoningEffort,
+          })}
           {channel.modelDisplay !== undefined && channel.modelDisplay !== channel.model
-            ? <>{' ('}{channel.model}{')'}</>
+            ? <>{' · '}{dim('name ')}{channel.modelDisplay}</>
             : null}
-          {' · '}{dim('provider ')}{channel.provider}
           {channel.contextWindow !== undefined
             ? <> · {dim('ctx ')}{formatTokens(channel.contextWindow)}</>
             : null}

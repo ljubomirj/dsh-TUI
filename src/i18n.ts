@@ -1389,7 +1389,6 @@ const dict = {
   'status-detail-session-id': { zh: '会话日志目录与此 id 同名', en: 'the session log directory is named after this id' },
   'status-detail-mode': { zh: '点击或 /permission 切换权限模式', en: 'click or /permission to switch the permission mode' },
   'status-detail-model': { zh: '点击或 /model 切换模型', en: 'click or /model to switch the model' },
-  'status-detail-effort': { zh: '点击或 /effort 调整推理强度', en: 'click or /effort to adjust reasoning effort' },
   'hint-ext-dialog-input': { zh: '**Enter** 确认 · Esc 取消', en: '**Enter** to confirm · Esc to cancel' },
   'hint-adjust-done': { zh: '**←/→** 调整 · Enter/Esc 完成', en: '**←/→** to adjust · Enter/Esc to done' },
   'hint-history-search': { zh: '↑/↓ 选择 · **Enter** 确认 · Esc 取消', en: '↑/↓ to navigate · **Enter** to select · Esc to cancel' },

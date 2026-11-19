@@ -158,3 +158,26 @@ export async function validateModelRoute(
   if (models.length === 0 || models.some(model => model.id === route.model)) return { route }
   return { route: fallback, rejected: route }
 }
+
+/**
+ * Spell a route the one way every surface shows it:
+ * `provider/model:effort`.
+ *
+ * That is the `[provider/]model[:effort]` spec `/model` and `/advisor model`
+ * accept, so a footer token can be typed back verbatim — the footer's job is
+ * to name the route that is actually running, not to prettify it. Every
+ * surface that prints a route (status line model segment, advisor segment,
+ * `/status`) goes through this function so the spellings cannot drift apart.
+ * Each segment appears only when it is known: no provider renders the bare
+ * model id, and no effort (the route default) stops at the model, so the
+ * token never ends in a dangling `/` or `:`.
+ * @param route - Provider, model id and effort to spell; `provider` and
+ * `effort` are optional because a pessimistic channel reports neither.
+ * @returns The compact route token.
+ */
+export function formatModelRoute(
+  route: { provider?: string | undefined; model: string; effort?: string | undefined },
+): string {
+  const head = nonEmpty(route.provider) ? `${route.provider}/${route.model}` : route.model
+  return nonEmpty(route.effort) ? `${head}:${route.effort}` : head
+}

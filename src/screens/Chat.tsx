@@ -28,6 +28,7 @@ import { execFileNoThrow } from '../utils/execFileNoThrow.js'
 import type { LlmModelInfo, LlmProviderInfo } from '../adapter/ports/channel-view.js'
 import { cleanBlockLines, cleanCommandReport, cleanRenderText, cleanScalarText } from '../dsh-adapter/sanitize.js'
 import { readModelRecents, recordModelUse, type ModelRecentsRef } from '../modelRecents.js'
+import { formatModelRoute } from '../modelRoute.js'
 import { WORKING_GATE_NOTICES } from '../commands.js'
 import type { ChannelUi as Channel } from '../adapter/channel/ui-policy.js'
 import { sessionCwdMatches, type ChatRow, type ComposerImageRef, type EffortOption, type ExternalCommandOutcome, type PermissionPresetSnapshot, type PresetOption, type SkillInfo } from '../dsh-adapter/channel.js'
@@ -326,11 +327,6 @@ const SELECTABLE_KINDS = new Set<ChatRow['kind']>([
 /** Shared empty list for mode-gated derived rows (stable reference, so
  *  downstream consumers never see a changing prop when the mode is off). */
 const NO_ROWS: readonly ChatRow[] = []
-
-/** `max` → `Max` (effort levels arrive lower-case from the adapter). */
-function capitalize(text: string): string {
-  return text.length === 0 ? text : text[0].toUpperCase() + text.slice(1)
-}
 
 /**
  * The occupancy line `/tokens` and `/status` print.
@@ -3697,7 +3693,7 @@ export function Chat({
       case 'status': {
         const usage = channel.lastUsage
         const lines: string[] = [
-          `${t('status-model', { model: channel.model })}${channel.reasoningEffort ? ` · ${capitalize(channel.reasoningEffort)} effort` : ''}`,
+          t('status-model', { model: formatModelRoute({ provider: channel.provider, model: channel.model, effort: channel.reasoningEffort }) }),
           `${t('status-state', { state: channel.working ? t('status-working') : t('status-idle') })}`,
           `${t('status-session', { id: channel.agentId })}`,
           `${t('status-dir', { cwd: displayWorkingDirectory(channel) })}${channel.gitBranch ? ` · ${channel.gitBranch}` : ''}`,
@@ -6109,18 +6105,14 @@ export function Chat({
    */
   const backendModeStatus = modeStatus(channel.backendModes?.()?.snapshot(), () => { void runCommand('permission', '') })
   /**
-   * 底栏模型段/思考档位段的点击（与模式段同一契约）：后端声明了模型目录或
-   * effort 能力（backendCapabilities 位）才挂，点击 = 既有 /model · /effort
-   * 命令（同一批选择器）；无能力不挂点击，hover 也不承诺（StatusLine 的
-   * effort hover id 与点击同乘，model hover 只是不追加操作行）。
+   * 底栏模型段的点击（与模式段同一契约）：后端声明了模型目录能力才挂，点击 =
+   * 既有 /model 命令。推理档位不再是独立段——它作为 `:effort` 后缀并入模型
+   * 路由 token（`provider/model:effort`），改档位用 /effort 或选择器里的档位行。
    */
   const backendCaps = channel.backendCapabilities as Channel['backendCapabilities'] | undefined
   const modelPickerStatus = backendCaps?.models === false
     ? undefined
     : { onOpen: () => { void runCommand('model', '') } }
-  const effortPickerStatus = backendCaps?.effort === false
-    ? undefined
-    : { onOpen: () => { void runCommand('effort', '') } }
 
   const pickerPanels = (
     <>
@@ -7554,10 +7546,9 @@ export function Chat({
           // route). DSH answers an empty list here — no prop, byte-identical
           // rendering.
           backendMode={backendModeStatus}
-          // 模型段/思考档位段：能力位在才可点，点击走既有 /model · /effort
-          // 命令（与模式段打开 /permission 完全同构）。
+          // 模型段：能力位在才可点，点击走既有 /model 命令（与模式段打开
+          // /permission 完全同构）；行内的 `:effort` 只是路由读法。
           modelPicker={modelPickerStatus}
-          effortPicker={effortPickerStatus}
           wake={
             wakeBand === undefined
               ? undefined

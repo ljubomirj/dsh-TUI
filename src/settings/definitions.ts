@@ -460,8 +460,8 @@ export const SETTING_DEFINITIONS = {
   'statusBar.thinking': {
     label: 'Show thinking',
     descriptions: { zh: '显示思考' },
-    hint: 'Show the live reasoning effort or thinking mode.',
-    hintDescriptions: { zh: '显示当前推理强度或思考模式。' },
+    hint: 'Show the live reasoning effort as the `:effort` suffix on the model route (`provider/model:effort`).',
+    hintDescriptions: { zh: '在模型路由末尾显示当前推理强度（`provider/model:effort` 的 `:effort`）。' },
     kind: 'boolean',
     group: 'status-bar',
   },
